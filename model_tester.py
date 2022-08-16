@@ -4,6 +4,9 @@ from os import listdir
 from os.path import isfile, join
 import os
 import torch
+import gc
+from PIL import Image
+import PIL
 
 
 def get_list_of_image_paths(directory):
@@ -77,14 +80,25 @@ def apply_brightness_contrast(input_img, brightness, contrast):
     return buf
 
 
-def get_detections(directory, _yolo_model):
+def get_image_contrast(_image):
+    img_grey = cv2.cvtColor(_image, cv2.COLOR_BGR2GRAY)
+    return img_grey.std()
+
+
+def get_image_brightness(_image):
+    _image = Image.fromarray(_image).convert('L')
+    stat = PIL.ImageStat.Stat(_image)
+    return stat.mean[0]
+
+
+def get_detections(directory, _yolo_model, _distance):
     all_detections = {}
     _IMAGE_FILES = get_list_of_image_paths(directory)
     with mp.solutions.pose.Pose(static_image_mode=True, model_complexity=2, enable_segmentation=True,
                                 min_detection_confidence=0.5) as _pose:
         for i, _file in enumerate(_IMAGE_FILES):
             print(_file)
-            name_to_save = _file.replace(directory, '')[1:-4]
+            name_to_save = _file.replace(directory, '')[1:-4] + f'({_distance} meters from camera)'
             name_to_save = os.path.join(os.getcwd(), 'temp pics', name_to_save)
             _organ_dictionary = {'nose': 0, 'left_inner_eye': 1, 'left_eye': 2, 'left_eye_outer': 3,
                                  'right_inner_eye': 4, 'right_eye': 5, 'right_eye_outer': 6, 'left_ear': 7,
@@ -97,36 +111,49 @@ def get_detections(directory, _yolo_model):
                                  'right_foot_index': 32}
             _image = cv2.imread(_file)
             _image_height, _image_width, _ = _image.shape
-            _results = _pose.process(cv2.cvtColor(_image, cv2.COLOR_BGR2RGB))
-            cv2.imwrite(f'{name_to_save} - full.png', _image)
-            if not _results.pose_landmarks:
-                yolo_results = _yolo_model(_image).pandas().xyxy[0]
-                yolo_results = yolo_results[yolo_results.eq('person').any(1)].sort_values('confidence').iloc[-1]
-                if len(yolo_results) > 0:
-                    padding_value = 50
-                    frame = (int(yolo_results['xmin']), int(yolo_results['xmax']),
-                             int(yolo_results['ymin']), int(yolo_results['ymax']))
-                    frame = adjust_frame(frame, _image.shape[0:2], padding_value)
-                    _image = _image[frame[2]:frame[3], frame[0]:frame[1]]
-                    cv2.imwrite(f'{name_to_save} - crop.png', _image)
-                    _image = apply_brightness_contrast(resize_image(_image, 500), 100, 100)
-                    cv2.imwrite(f'{name_to_save} - crop resize and brighten.png', _image)
-                    _results = _pose.process(cv2.cvtColor(_image, cv2.COLOR_BGR2RGB))
-                    if not _results.pose_landmarks:
-                        all_detections[_file] = 'Failed to identify a person'
-                        continue
-                else:
-                    all_detections[_file] = None
+
+            cv2.imwrite(f'{name_to_save} - 0 full.png', _image)
+
+            yolo_results = _yolo_model(_image).pandas().xyxy[0]
+            yolo_results = yolo_results[yolo_results.eq('person').any(1)].sort_values('confidence').iloc[-1]
+            if len(yolo_results) > 0:
+                padding_value = 50
+                frame = (int(yolo_results['xmin']), int(yolo_results['xmax']),
+                         int(yolo_results['ymin']), int(yolo_results['ymax']))
+                frame = adjust_frame(frame, _image.shape[0:2], padding_value)
+                _image = _image[frame[2]:frame[3], frame[0]:frame[1]]
+                cv2.imwrite(f'{name_to_save} - 1 crop.png', _image)
+                _image = apply_brightness_contrast(resize_image(_image, 500),
+                                                   2 * get_image_brightness(_image), 2 * get_image_contrast(_image))
+                cv2.imwrite(f'{name_to_save} - 2 crop resize and brighten.png', _image)
+                _results = _pose.process(cv2.cvtColor(_image, cv2.COLOR_BGR2RGB))
+
+                if not _results.pose_landmarks:
+                    all_detections[_file] = 'Failed to identify a person'
                     continue
 
+            else:
+                all_detections[_file] = None
+                continue
+            draw_detections_on_image(_image, f'{name_to_save} - 3 with pose landmarks.png', _results)
             for _organ in _organ_dictionary:
-                detection = _results.pose_landmarks.landmark[_organ_dictionary[_organ]]
-                _organ_dictionary[_organ] = {'x': detection.x, 'y': detection.y,
-                                             'z': detection.z, 'visibility': detection.visibility}
+                _detection = _results.pose_landmarks.landmark[_organ_dictionary[_organ]]
+                _organ_dictionary[_organ] = {'x': _detection.x, 'y': _detection.y,
+                                             'z': _detection.z, 'visibility': _detection.visibility}
 
             all_detections[_file] = _organ_dictionary
 
     return all_detections
+
+
+def draw_detections_on_image(_image, _image_path, _results):
+    mp_drawing = mp.solutions.drawing_utils
+    mp_drawing_styles = mp.solutions.drawing_styles
+    mp_pose = mp.solutions.pose
+    annotated_image = _image.copy()
+    mp_drawing.draw_landmarks(annotated_image, _results.pose_landmarks, mp_pose.POSE_CONNECTIONS,
+                              landmark_drawing_spec=mp_drawing_styles.get_default_pose_landmarks_style())
+    cv2.imwrite(_image_path, annotated_image)
 
 
 img_directory = r'C:\Users\kahan\PycharmProjects\pose estimation\pics'
@@ -136,7 +163,7 @@ yolo_model = torch.hub.load('ultralytics/yolov5', 'yolov5x6')
 
 for distance in distances:
     path = os.path.join(img_directory, distance)
-    results_by_distance[distance] = get_detections(path, yolo_model)
+    results_by_distance[distance] = get_detections(path, yolo_model, distance)
 
 keys = list(results_by_distance.keys())
 int_keys = []
@@ -155,3 +182,17 @@ for key in scores:
 print("\n\n")
 for (distance, result) in scores.items():
     print(f'Detected skeleton in {result[0]} out of {result[1]} images from {distance} meters away.')
+
+hands_only = {}
+for key in scores:
+    counter = 0
+    for score in results_by_distance[str(key)]:
+        detection = results_by_distance[str(key)][score]
+        if detection != 'Failed to identify a person':
+            hands = {'left': {'elbow': detection['left_elbow'], 'wrist': detection['left_wrist']},
+                     'right': {'elbow': detection['right_elbow'], 'wrist': detection['right_wrist']}}
+            hands_only[score] = hands
+
+del (detection, counter, distance, hands, int_keys, key, path, result, score, yolo_model)
+gc.collect()
+print('a')
