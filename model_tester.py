@@ -7,6 +7,8 @@ import torch
 import gc
 from PIL import Image
 import PIL
+from math import atan2, degrees
+import numpy as np
 
 
 def get_list_of_image_paths(directory):
@@ -123,8 +125,13 @@ def get_detections(directory, _yolo_model, _distance):
                 frame = adjust_frame(frame, _image.shape[0:2], padding_value)
                 _image = _image[frame[2]:frame[3], frame[0]:frame[1]]
                 cv2.imwrite(f'{name_to_save} - 1 crop.png', _image)
-                _image = apply_brightness_contrast(resize_image(_image, 500),
-                                                   2 * get_image_brightness(_image), 2 * get_image_contrast(_image))
+                _image = resize_image(_image, 500)
+
+                image_brightness = get_image_brightness(_image)
+                image_contrast = get_image_contrast(_image)
+
+                _image = apply_brightness_contrast(_image, 150 - image_brightness,
+                                                   400 * ((image_contrast / image_brightness)**2))
                 cv2.imwrite(f'{name_to_save} - 2 crop resize and brighten.png', _image)
                 _results = _pose.process(cv2.cvtColor(_image, cv2.COLOR_BGR2RGB))
 
@@ -154,6 +161,11 @@ def draw_detections_on_image(_image, _image_path, _results):
     mp_drawing.draw_landmarks(annotated_image, _results.pose_landmarks, mp_pose.POSE_CONNECTIONS,
                               landmark_drawing_spec=mp_drawing_styles.get_default_pose_landmarks_style())
     cv2.imwrite(_image_path, annotated_image)
+
+
+def get_angle(point_1, point_2):
+    angle = atan2(point_1['y'] - point_2['y'], point_1['x'] - point_2['x'])
+    return 180 + degrees(angle)
 
 
 img_directory = r'C:\Users\kahan\PycharmProjects\pose estimation\pics'
@@ -189,10 +201,18 @@ for key in scores:
     for score in results_by_distance[str(key)]:
         detection = results_by_distance[str(key)][score]
         if detection != 'Failed to identify a person':
-            hands = {'left': {'elbow': detection['left_elbow'], 'wrist': detection['left_wrist']},
-                     'right': {'elbow': detection['right_elbow'], 'wrist': detection['right_wrist']}}
+            hands = {'left': {'shoulder': detection['left_shoulder'], 'elbow': detection['left_elbow'],
+                              'wrist': detection['left_wrist'], 'index': detection['left_index']},
+                     'right': {'shoulder': detection['right_shoulder'], 'elbow': detection['right_elbow'],
+                               'wrist': detection['right_wrist'], 'index': detection['right_index']}}
             hands_only[score] = hands
 
 del (detection, counter, distance, hands, int_keys, key, path, result, score, yolo_model)
 gc.collect()
+
+angles = hands_only.copy()
+for file in hands_only:
+    for direction in hands_only[file]:
+        angles[file][direction] = get_angle(hands_only[file][direction]['elbow'], hands_only[file][direction]['wrist'])
+
 print('a')
